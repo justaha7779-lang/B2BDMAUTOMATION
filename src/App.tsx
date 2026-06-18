@@ -30,6 +30,12 @@ import {
 import AutomationTargetPanel from './components/AutomationTargetPanel';
 import ScanProgressPanel from './components/ScanProgressPanel';
 import type { Lead } from './types/lead';
+import {
+  lsLoadStats, lsSaveStats,
+  lsLoadTargetIndex, lsSaveTargetIndex,
+  lsLoadOutreachCompleted, lsSaveOutreachCompleted,
+  idbSaveLeads, idbLoadLeads,
+} from './lib/persistence';
 
 interface Stats {
   totalScans: number;
@@ -65,7 +71,7 @@ const US_TARGETS = [
 export default function App() {
   // Global Engine Controls
   const [isAutonomousActive, setIsAutonomousActive] = useState(false);
-  const [currentTargetIndex, setCurrentTargetIndex] = useState(0);
+  const [currentTargetIndex, setCurrentTargetIndex] = useState(() => lsLoadTargetIndex());
   
   // App UI Navigation States
   const [isScanning, setIsScanning] = useState(false);
@@ -80,21 +86,28 @@ export default function App() {
   const [campaignQueue, setCampaignQueue] = useState<CampaignQueueItem[]>([]);
   const [telemetryLogs, setTelemetryLogs] = useState<TelemetryLog[]>([]);
   
-  const [stats, setStats] = useState<Stats>({
-    totalScans: 24,
-    totalLeads: 1547,
-    messagesSent: 892,
-    successRate: 94.2,
-  });
+  const [stats, setStats] = useState<Stats>(() => lsLoadStats());
 
   // Axiom Outreach Driver State
   const [outreachIndex, setOutreachIndex] = useState(0);
-  const [outreachCompleted, setOutreachCompleted] = useState<Set<string>>(new Set());
+  const [outreachCompleted, setOutreachCompleted] = useState<Set<string>>(() => lsLoadOutreachCompleted());
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [copyFeedback, setCopyFeedback] = useState<string | null>(null);
 
   const cronLoopRef = useRef<NodeJS.Timeout | null>(null);
   const dripLoopRef = useRef<NodeJS.Timeout | null>(null);
+  const persistenceInitRef = useRef(false);
+
+  // Restore campaign queue from IndexedDB on first mount
+  useEffect(() => {
+    if (persistenceInitRef.current) return;
+    persistenceInitRef.current = true;
+    idbLoadLeads<CampaignQueueItem>().then((stored) => {
+      if (stored.length > 0) {
+        setCampaignQueue(stored);
+      }
+    });
+  }, []);
 
   const addLog = useCallback((message: string, type: TelemetryLog['type'] = 'info') => {
     const now = new Date();
@@ -178,8 +191,16 @@ export default function App() {
 
           addLog(`Extraction Complete. ${mockScrapedLeads.length} pre-qualified targets intercepted.`, 'success');
           
-          setCampaignQueue(prev => [...prev, ...mockScrapedLeads]);
-          setStats(prev => ({ ...prev, totalScans: prev.totalScans + 1, totalLeads: prev.totalLeads + mockScrapedLeads.length }));
+          setCampaignQueue(prev => {
+            const next = [...prev, ...mockScrapedLeads];
+            idbSaveLeads(next);
+            return next;
+          });
+          setStats(prev => {
+            const next = { ...prev, totalScans: prev.totalScans + 1, totalLeads: prev.totalLeads + mockScrapedLeads.length };
+            lsSaveStats(next);
+            return next;
+          });
           setIsScanning(false);
           setScanProgress(0);
           
@@ -188,7 +209,11 @@ export default function App() {
             dispatchToGoogleSheets(lead);
           });
 
-          setCurrentTargetIndex(prev => (prev + 1) % US_TARGETS.length);
+          setCurrentTargetIndex(prev => {
+            const next = (prev + 1) % US_TARGETS.length;
+            lsSaveTargetIndex(next);
+            return next;
+          });
         }, 4000);
       };
 
@@ -226,8 +251,14 @@ export default function App() {
             setTimeout(() => {
               targetLead.status = 'Dispatched';
               addLog(`Message successfully transmitted to ${targetLead.companyName}.`, 'success');
-              setStats(s => ({ ...s, messagesSent: s.messagesSent + 1 }));
-              setCampaignQueue([...updatedQueue]);
+              setStats(s => {
+                const next = { ...s, messagesSent: s.messagesSent + 1 };
+                lsSaveStats(next);
+                return next;
+              });
+              const finalQueue = [...updatedQueue];
+              setCampaignQueue(finalQueue);
+              idbSaveLeads(finalQueue);
             }, 3000);
 
             return updatedQueue;
@@ -296,8 +327,16 @@ export default function App() {
   };
 
   const handleMarkSent = (leadId: string) => {
-    setOutreachCompleted(prev => new Set(prev).add(leadId));
-    setStats(s => ({ ...s, messagesSent: s.messagesSent + 1 }));
+    setOutreachCompleted(prev => {
+      const next = new Set(prev).add(leadId);
+      lsSaveOutreachCompleted(next);
+      return next;
+    });
+    setStats(s => {
+      const next = { ...s, messagesSent: s.messagesSent + 1 };
+      lsSaveStats(next);
+      return next;
+    });
     addLog(`[Axiom Driver] Lead marked as sent. Moving to next.`, 'success');
     if (outreachIndex < scheduledLeads.length - 1) {
       setOutreachIndex(outreachIndex + 1);
