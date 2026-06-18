@@ -129,8 +129,14 @@ class ContinuousEngine:
             niche=target.niche
         )
 
-        # Flush any previously failed sheets posts before starting new cycle
-        await sheets_pipeline.flush_retry_queue()
+        # Phase 0: Flush any previously failed sheets posts before starting new cycle
+        retry_synced = await sheets_pipeline.flush_retry_queue()
+        retry_pending = json_cache.get_retry_queue_stats()["pending"]
+        logger.info(
+            "Retry queue flush complete",
+            retry_synced=retry_synced,
+            retry_pending=retry_pending,
+        )
 
         try:
             # Phase 1: Discover leads
@@ -146,14 +152,17 @@ class ContinuousEngine:
 
             # Fire all sheets POSTs concurrently (non-blocking)
             sheets_results = await asyncio.gather(*sheets_sync_coroutines, return_exceptions=True)
-            synced_count = sum(1 for r in sheets_results if r is True)
+            new_synced = sum(1 for r in sheets_results if r is True)
+            synced_count = new_synced + retry_synced
 
             qualified = filter_qualified_leads(leads)
             logger.info(
                 "Scan complete",
                 discovered=len(leads),
                 qualified=len(qualified),
-                sheets_synced=synced_count
+                new_sheets_synced=new_synced,
+                retry_sheets_synced=retry_synced,
+                total_sheets_synced=synced_count,
             )
 
             # Phase 3: Save all leads to JSON cache (zero-loss local endpoint)

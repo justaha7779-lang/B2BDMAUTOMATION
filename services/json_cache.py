@@ -11,8 +11,8 @@ The cache is loaded on startup and appended to on every scan cycle.
 import json
 import os
 import threading
-from datetime import datetime
-from typing import List
+from datetime import datetime, timedelta
+from typing import List, Dict, Any
 from dataclasses import asdict
 
 import structlog
@@ -22,6 +22,7 @@ from services.qualification import QualifiedLead
 logger = structlog.get_logger()
 
 CACHE_FILENAME = "leads_cache.json"
+MAX_RETRY_ATTEMPTS = 10
 
 
 class JsonStateCache:
@@ -185,6 +186,150 @@ class JsonStateCache:
             'last_updated': meta.get('last_updated'),
             'niche_breakdown': niche_counts,
             'city_breakdown': city_counts,
+        }
+
+    # ───────────────────────────────────────────────
+    # Retry queue (persistent background cache)
+    # ───────────────────────────────────────────────
+
+    def _ensure_retry_queue(self) -> None:
+        """Guarantee the retry queue structure exists in cache."""
+        if 'sheets_retry_queue' not in self._cache:
+            self._cache['sheets_retry_queue'] = []
+
+    def get_retry_queue(self) -> List[Dict[str, Any]]:
+        """Return the persistent sheets retry queue entries."""
+        self._ensure_retry_queue()
+        return list(self._cache.get('sheets_retry_queue', []))
+
+    def add_to_retry_queue(self, lead: QualifiedLead, attempts: int = 0) -> None:
+        """Append a failed lead to the persistent retry queue."""
+        self._ensure_retry_queue()
+        with self._lock:
+            entry = {
+                'lead_id': lead.id,
+                'company_name': lead.company_name,
+                'phone': lead.phone,
+                'website': lead.website,
+                'facebook_link': lead.facebook_link,
+                'city': lead.city,
+                'state': lead.state,
+                'niche': lead.niche,
+                'dm_eligible': lead.dm_eligible,
+                'contact_form_present': lead.contact_form_present,
+                'has_live_chat_widget': lead.has_live_chat_widget,
+                'messenger_button_active': lead.messenger_button_active,
+                'qualification_score': lead.qualification_score,
+                'disqualification_reason': lead.disqualification_reason,
+                'customized_script': lead.customized_script,
+                'created_at': lead.created_at,
+                'scan_session_id': lead.scan_session_id,
+                'attempts': attempts,
+                'last_attempt': datetime.now().isoformat(),
+            }
+            # Prevent duplicates
+            if not any(e.get('lead_id') == lead.id for e in self._cache['sheets_retry_queue']):
+                self._cache['sheets_retry_queue'].append(entry)
+                self._cache['metadata']['last_updated'] = datetime.now().isoformat()
+                self._save_cache()
+                logger.info(
+                    "Lead added to persistent retry queue",
+                    company=lead.company_name,
+                    lead_id=lead.id,
+                    attempts=attempts
+                )
+
+    def pop_retry_queue(self, lead_id: str) -> None:
+        """Remove a successfully re-transmitted lead from the retry queue."""
+        self._ensure_retry_queue()
+        with self._lock:
+            original = len(self._cache['sheets_retry_queue'])
+            self._cache['sheets_retry_queue'] = [
+                e for e in self._cache['sheets_retry_queue']
+                if e.get('lead_id') != lead_id
+            ]
+            if len(self._cache['sheets_retry_queue']) < original:
+                self._cache['metadata']['last_updated'] = datetime.now().isoformat()
+                self._save_cache()
+
+    def prune_retry_queue(self) -> int:
+        """Drop entries that have exceeded max retry attempts."""
+        self._ensure_retry_queue()
+        with self._lock:
+            original = len(self._cache['sheets_retry_queue'])
+            self._cache['sheets_retry_queue'] = [
+                e for e in self._cache['sheets_retry_queue']
+                if e.get('attempts', 0) < MAX_RETRY_ATTEMPTS
+            ]
+            pruned = original - len(self._cache['sheets_retry_queue'])
+            if pruned:
+                self._cache['metadata']['last_updated'] = datetime.now().isoformat()
+                self._save_cache()
+                logger.warning("Pruned stale retry queue entries", pruned=pruned)
+            return pruned
+
+    def retry_queue_to_leads(self) -> List[QualifiedLead]:
+        """Convert retry queue entries back to QualifiedLead objects."""
+        entries = self.get_retry_queue()
+        leads = []
+        for e in entries:
+            if e.get('attempts', 0) >= MAX_RETRY_ATTEMPTS:
+                continue
+            # Exponential backoff: only re-attempt if enough time passed
+            # wait = 2^attempts minutes (max ~17 hours at attempt 10)
+            minutes_wait = min(2 ** e.get('attempts', 0), 60)
+            try:
+                last_attempt = datetime.fromisoformat(e.get('last_attempt', datetime.now().isoformat()))
+            except (ValueError, TypeError):
+                last_attempt = datetime.now()
+            if datetime.now() - last_attempt < timedelta(minutes=minutes_wait):
+                continue
+            try:
+                lead = QualifiedLead(
+                    id=e['lead_id'],
+                    company_name=e['company_name'],
+                    phone=e.get('phone', ''),
+                    website=e.get('website', ''),
+                    facebook_link=e.get('facebook_link', ''),
+                    city=e.get('city', ''),
+                    state=e.get('state', ''),
+                    niche=e.get('niche', ''),
+                    dm_eligible=e.get('dm_eligible', True),
+                    contact_form_present=e.get('contact_form_present', False),
+                    has_live_chat_widget=e.get('has_live_chat_widget', False),
+                    messenger_button_active=e.get('messenger_button_active', False),
+                    qualification_score=e.get('qualification_score', 0),
+                    disqualification_reason=e.get('disqualification_reason'),
+                    customized_script=e.get('customized_script', ''),
+                    created_at=e.get('created_at', datetime.now().isoformat()),
+                    scan_session_id=e.get('scan_session_id', ''),
+                )
+                leads.append(lead)
+            except (KeyError, TypeError) as exc:
+                logger.warning("Corrupted retry queue entry skipped", error=str(exc))
+                continue
+        return leads
+
+    def increment_retry_attempt(self, lead_id: str) -> int:
+        """Bump the attempt counter for a queued lead. Return new count."""
+        self._ensure_retry_queue()
+        with self._lock:
+            for entry in self._cache['sheets_retry_queue']:
+                if entry.get('lead_id') == lead_id:
+                    entry['attempts'] = entry.get('attempts', 0) + 1
+                    entry['last_attempt'] = datetime.now().isoformat()
+                    self._cache['metadata']['last_updated'] = datetime.now().isoformat()
+                    self._save_cache()
+                    return entry['attempts']
+        return 0
+
+    def get_retry_queue_stats(self) -> dict:
+        """Return summary of retry queue state."""
+        entries = self.get_retry_queue()
+        return {
+            'pending': len(entries),
+            'max_attempts': MAX_RETRY_ATTEMPTS,
+            'over_limit': len([e for e in entries if e.get('attempts', 0) >= MAX_RETRY_ATTEMPTS]),
         }
 
     def export_for_sheets(self) -> List[dict]:
