@@ -1,0 +1,5 @@
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS contact_form_present BOOLEAN DEFAULT false;
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS has_live_chat_widget BOOLEAN DEFAULT false;
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS messenger_button_active BOOLEAN DEFAULT false;
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS qualification_score INTEGER DEFAULT 0;
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS disqualification_reason TEXT;

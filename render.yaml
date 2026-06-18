@@ -1,0 +1,41 @@
+services:
+  # Primary: B2B Lead Engine (Python backend)
+  - type: web
+    name: b2b-lead-engine
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.0"
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: GOOGLE_SHEETS_WEBHOOK_URL
+        sync: false
+      - key: SCAN_INTERVAL_HOURS
+        value: "6"
+      - key: DRIP_INTERVAL_MIN_MINUTES
+        value: "30"
+      - key: DRIP_INTERVAL_MAX_MINUTES
+        value: "60"
+      - key: AUTONOMOUS_MODE
+        value: "true"
+      - key: PORT
+        value: "8000"
+    healthCheckPath: /health
+
+  # Secondary: Agency Dashboard (Vite static preview)
+  - type: web
+    name: agency-dashboard
+    runtime: node
+    buildCommand: npm install && npm run build
+    startCommand: npm run preview
+    envVars:
+      - key: NODE_VERSION
+        value: "20.0.0"
+      - key: VITE_DASHBOARD_MODE
+        value: "preview"

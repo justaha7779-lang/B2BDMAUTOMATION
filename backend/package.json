@@ -1,0 +1,29 @@
+{
+  "name": "b2b-prospecting-backend",
+  "version": "1.0.0",
+  "description": "Autonomous B2B lead generation and qualification engine",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "ts-node-dev --respawn src/index.ts",
+    "lint": "eslint src --ext .ts"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.57.4",
+    "cron": "^3.1.6",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "node-fetch": "^2.7.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.14.2",
+    "@types/node-fetch": "^2.6.11",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5.5.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
